@@ -45,4 +45,4 @@ If payment fails, Payment Service publishes `PaymentFailed` to the `payments` to
 
 ## Diagram
 
-See kafka-event-flow diagram for a visual overview.
+See [kafka-event-flow.png](diagrams/kafka-event-flow.png) for a visual overview.

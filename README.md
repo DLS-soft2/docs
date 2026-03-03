@@ -27,7 +27,7 @@ We are building a food delivery platform as a distributed system of microservice
 
 ## System Architecture
 
-The system is structured as independent microservices behind an API Gateway, with Kafka as the message broker and Keycloak as the identity provider.
+The system is structured as independent microservices behind an API Gateway, with Kafka as the message broker and Keycloak as the identity provider. See [system architecture diagram](diagrams/first-version-no-infra.png) for a visual overview.
 
 **Services:**
 
@@ -55,7 +55,7 @@ Each microservice lives in its own GitHub repository under the DLS-soft2 organis
 
 ## Architectural Patterns
 
-**Choreography-based saga** — Services react to Kafka events and the Order Service maintains the state. See `saga-events.md` for the full event flow.
+**Choreography-based saga** — Services react to Kafka events and the Order Service maintains the state. See [saga-events.md](saga-events.md) for the full event flow.
 
 **CQRS** — under consideration but will be implemented for services with a high read-to-write ratio (e.g. customers frequently checking order status vs. fewer writes).
 
@@ -123,6 +123,6 @@ README per repository. API documentation via Swagger. Possibly docosaurus for co
 
 ## Functional & Non-Functional Requirements
 
-See `functional-reqs.md`.
+See [functional-reqs.md](functional-reqs.md).
 
 ---
