@@ -1,0 +1,732 @@
+asyncapi: 3.0.0
+
+info:
+  title: DLS-2 Food Delivery Platform
+  version: 1.0.0
+  description: |
+    Async event documentation for the DLS-2 food delivery platform.
+    All inter-service communication uses Apache Kafka with a choreography-based saga pattern.
+    Order Service is the saga state holder — it consumes events from all other participants
+    and transitions order status accordingly.
+
+    **Saga happy path:**
+    OrderCreated → PaymentAuthorized → RestaurantAccepted → CourierAssigned → DeliveryCompleted
+
+    **Compensation flows:**
+    - PaymentFailed → order cancelled
+    - RestaurantRejected → payment refunded, order cancelled
+    - CourierAssignmentFailed → payment refunded, order cancelled
+
+servers:
+  development:
+    host: localhost:9092
+    protocol: kafka
+    description: Local development (docker-compose)
+  docker:
+    host: kafka:9092
+    protocol: kafka
+    description: Docker network (inter-container)
+
+channels:
+  orders:
+    address: orders
+    messages:
+      OrderCreated:
+        $ref: '#/components/messages/OrderCreated'
+    description: |
+      Order lifecycle events. Published by Order Service when a new order is placed.
+      Partition key: order_id (ensures all events for the same order go to the same partition).
+
+  payments:
+    address: payments
+    messages:
+      PaymentAuthorized:
+        $ref: '#/components/messages/PaymentAuthorized'
+      PaymentFailed:
+        $ref: '#/components/messages/PaymentFailed'
+      PaymentRefunded:
+        $ref: '#/components/messages/PaymentRefunded'
+    description: |
+      Payment result events. Published by Payment Service after processing a payment
+      or issuing a refund. Partition key: order_id.
+
+  restaurants:
+    address: restaurants
+    messages:
+      RestaurantAccepted:
+        $ref: '#/components/messages/RestaurantAccepted'
+      RestaurantRejected:
+        $ref: '#/components/messages/RestaurantRejected'
+    description: |
+      Restaurant decision events. Published by Restaurant Service when staff accepts
+      or rejects a pending order via REST endpoints. Partition key: order_id.
+
+  couriers:
+    address: couriers
+    messages:
+      CourierAssigned:
+        $ref: '#/components/messages/CourierAssigned'
+      CourierAssignmentFailed:
+        $ref: '#/components/messages/CourierAssignmentFailed'
+    description: |
+      Courier assignment events. Published by Courier Service after attempting to
+      assign a courier (using AI Service for scoring). Partition key: order_id.
+
+  deliveries:
+    address: deliveries
+    messages:
+      DeliveryCompleted:
+        $ref: '#/components/messages/DeliveryCompleted'
+    description: |
+      Delivery completion events. Published by Courier Service when a delivery
+      is marked as completed. Partition key: order_id.
+
+operations:
+  # --- Order Service ---
+  orderService.publishOrderCreated:
+    action: send
+    channel:
+      $ref: '#/channels/orders'
+    messages:
+      - $ref: '#/channels/orders/messages/OrderCreated'
+    summary: Order Service publishes OrderCreated when a customer places a new order.
+
+  orderService.consumePayments:
+    action: receive
+    channel:
+      $ref: '#/channels/payments'
+    messages:
+      - $ref: '#/channels/payments/messages/PaymentAuthorized'
+      - $ref: '#/channels/payments/messages/PaymentFailed'
+      - $ref: '#/channels/payments/messages/PaymentRefunded'
+    summary: Order Service consumes payment events to update order status.
+    description: |
+      Consumer group: order-service-group.
+      PaymentAuthorized → PENDING → PAID.
+      PaymentFailed → any → CANCELLED.
+      PaymentRefunded → any non-terminal → CANCELLED.
+
+  orderService.consumeRestaurants:
+    action: receive
+    channel:
+      $ref: '#/channels/restaurants'
+    messages:
+      - $ref: '#/channels/restaurants/messages/RestaurantAccepted'
+      - $ref: '#/channels/restaurants/messages/RestaurantRejected'
+    summary: Order Service consumes restaurant decisions to update order status.
+    description: |
+      Consumer group: order-service-group.
+      RestaurantAccepted → PAID → PREPARING.
+      RestaurantRejected → PAID → CANCELLED.
+
+  orderService.consumeCouriers:
+    action: receive
+    channel:
+      $ref: '#/channels/couriers'
+    messages:
+      - $ref: '#/channels/couriers/messages/CourierAssigned'
+      - $ref: '#/channels/couriers/messages/CourierAssignmentFailed'
+    summary: Order Service consumes courier events to update order status.
+    description: |
+      Consumer group: order-service-group.
+      CourierAssigned → PREPARING → OUT_FOR_DELIVERY.
+      CourierAssignmentFailed → PREPARING → CANCELLED.
+
+  orderService.consumeDeliveries:
+    action: receive
+    channel:
+      $ref: '#/channels/deliveries'
+    messages:
+      - $ref: '#/channels/deliveries/messages/DeliveryCompleted'
+    summary: Order Service consumes delivery events to finalize order status.
+    description: |
+      Consumer group: order-service-group.
+      DeliveryCompleted → OUT_FOR_DELIVERY → DELIVERED.
+
+  # --- Payment Service ---
+  paymentService.publishPaymentAuthorized:
+    action: send
+    channel:
+      $ref: '#/channels/payments'
+    messages:
+      - $ref: '#/channels/payments/messages/PaymentAuthorized'
+    summary: Payment Service publishes PaymentAuthorized when payment succeeds.
+
+  paymentService.publishPaymentFailed:
+    action: send
+    channel:
+      $ref: '#/channels/payments'
+    messages:
+      - $ref: '#/channels/payments/messages/PaymentFailed'
+    summary: Payment Service publishes PaymentFailed when payment is declined.
+
+  paymentService.publishPaymentRefunded:
+    action: send
+    channel:
+      $ref: '#/channels/payments'
+    messages:
+      - $ref: '#/channels/payments/messages/PaymentRefunded'
+    summary: Payment Service publishes PaymentRefunded after a compensating refund.
+
+  paymentService.consumeOrders:
+    action: receive
+    channel:
+      $ref: '#/channels/orders'
+    messages:
+      - $ref: '#/channels/orders/messages/OrderCreated'
+    summary: Payment Service consumes OrderCreated to process payment.
+    description: |
+      Consumer group: payment-service-group.
+      Triggers simulated payment processing and publishes PaymentAuthorized or PaymentFailed.
+
+  paymentService.consumeRestaurants:
+    action: receive
+    channel:
+      $ref: '#/channels/restaurants'
+    messages:
+      - $ref: '#/channels/restaurants/messages/RestaurantRejected'
+    summary: Payment Service consumes RestaurantRejected to trigger refund.
+    description: |
+      Consumer group: payment-service-group.
+      RestaurantRejected triggers AUTHORIZED → REFUNDED transition, then publishes PaymentRefunded.
+
+  paymentService.consumeCouriers:
+    action: receive
+    channel:
+      $ref: '#/channels/couriers'
+    messages:
+      - $ref: '#/channels/couriers/messages/CourierAssignmentFailed'
+    summary: Payment Service consumes CourierAssignmentFailed to trigger refund.
+    description: |
+      Consumer group: payment-service-group.
+      CourierAssignmentFailed triggers AUTHORIZED → REFUNDED transition, then publishes PaymentRefunded.
+
+  # --- Restaurant Service ---
+  restaurantService.publishRestaurantAccepted:
+    action: send
+    channel:
+      $ref: '#/channels/restaurants'
+    messages:
+      - $ref: '#/channels/restaurants/messages/RestaurantAccepted'
+    summary: Restaurant Service publishes RestaurantAccepted when staff accepts an order.
+
+  restaurantService.publishRestaurantRejected:
+    action: send
+    channel:
+      $ref: '#/channels/restaurants'
+    messages:
+      - $ref: '#/channels/restaurants/messages/RestaurantRejected'
+    summary: Restaurant Service publishes RestaurantRejected when staff rejects an order.
+
+  restaurantService.consumePayments:
+    action: receive
+    channel:
+      $ref: '#/channels/payments'
+    messages:
+      - $ref: '#/channels/payments/messages/PaymentAuthorized'
+    summary: Restaurant Service consumes PaymentAuthorized to create a PendingOrder.
+    description: |
+      Consumer group: restaurant-service-group.
+      Creates a PendingOrder record for restaurant staff to accept or reject via REST.
+
+  # --- Courier Service ---
+  courierService.publishCourierAssigned:
+    action: send
+    channel:
+      $ref: '#/channels/couriers'
+    messages:
+      - $ref: '#/channels/couriers/messages/CourierAssigned'
+    summary: Courier Service publishes CourierAssigned after successfully assigning a courier.
+
+  courierService.publishCourierAssignmentFailed:
+    action: send
+    channel:
+      $ref: '#/channels/couriers'
+    messages:
+      - $ref: '#/channels/couriers/messages/CourierAssignmentFailed'
+    summary: Courier Service publishes CourierAssignmentFailed when no courier is available.
+
+  courierService.publishDeliveryCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/deliveries'
+    messages:
+      - $ref: '#/channels/deliveries/messages/DeliveryCompleted'
+    summary: Courier Service publishes DeliveryCompleted when a delivery is marked as delivered.
+
+  courierService.consumeRestaurants:
+    action: receive
+    channel:
+      $ref: '#/channels/restaurants'
+    messages:
+      - $ref: '#/channels/restaurants/messages/RestaurantAccepted'
+    summary: Courier Service consumes RestaurantAccepted to trigger courier assignment.
+    description: |
+      Consumer group: courier-service-group.
+      Triggers AI-scored courier assignment. Publishes CourierAssigned or CourierAssignmentFailed.
+
+  # --- Notification Service ---
+  notificationService.consumeOrders:
+    action: receive
+    channel:
+      $ref: '#/channels/orders'
+    messages:
+      - $ref: '#/channels/orders/messages/OrderCreated'
+    summary: Notification Service consumes all order events.
+    description: "Consumer group: notification-service-group."
+
+  notificationService.consumePayments:
+    action: receive
+    channel:
+      $ref: '#/channels/payments'
+    messages:
+      - $ref: '#/channels/payments/messages/PaymentAuthorized'
+      - $ref: '#/channels/payments/messages/PaymentFailed'
+      - $ref: '#/channels/payments/messages/PaymentRefunded'
+    summary: Notification Service consumes all payment events.
+    description: "Consumer group: notification-service-group."
+
+  notificationService.consumeRestaurants:
+    action: receive
+    channel:
+      $ref: '#/channels/restaurants'
+    messages:
+      - $ref: '#/channels/restaurants/messages/RestaurantAccepted'
+      - $ref: '#/channels/restaurants/messages/RestaurantRejected'
+    summary: Notification Service consumes all restaurant events.
+    description: "Consumer group: notification-service-group."
+
+  notificationService.consumeCouriers:
+    action: receive
+    channel:
+      $ref: '#/channels/couriers'
+    messages:
+      - $ref: '#/channels/couriers/messages/CourierAssigned'
+      - $ref: '#/channels/couriers/messages/CourierAssignmentFailed'
+    summary: Notification Service consumes all courier events.
+    description: "Consumer group: notification-service-group."
+
+  notificationService.consumeDeliveries:
+    action: receive
+    channel:
+      $ref: '#/channels/deliveries'
+    messages:
+      - $ref: '#/channels/deliveries/messages/DeliveryCompleted'
+    summary: Notification Service consumes delivery completion events.
+    description: |
+      Consumer group: notification-service-group.
+      Also consumed by KEDA ScaledJob (run_dispatch_job) for serverless batch processing.
+
+components:
+  messages:
+    OrderCreated:
+      name: OrderCreated
+      title: Order Created
+      summary: A new order has been placed by a customer.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/OrderCreatedPayload'
+
+    PaymentAuthorized:
+      name: PaymentAuthorized
+      title: Payment Authorized
+      summary: Payment was successfully authorized for an order.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/PaymentAuthorizedPayload'
+
+    PaymentFailed:
+      name: PaymentFailed
+      title: Payment Failed
+      summary: Payment was declined for an order.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/PaymentFailedPayload'
+
+    PaymentRefunded:
+      name: PaymentRefunded
+      title: Payment Refunded
+      summary: Payment was refunded after a compensating action (RestaurantRejected or CourierAssignmentFailed).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/PaymentRefundedPayload'
+
+    RestaurantAccepted:
+      name: RestaurantAccepted
+      title: Restaurant Accepted
+      summary: Restaurant staff accepted the order and preparation has started.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/RestaurantAcceptedPayload'
+
+    RestaurantRejected:
+      name: RestaurantRejected
+      title: Restaurant Rejected
+      summary: Restaurant staff rejected the order (triggers compensation).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/RestaurantRejectedPayload'
+
+    CourierAssigned:
+      name: CourierAssigned
+      title: Courier Assigned
+      summary: A courier has been assigned to pick up and deliver the order.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/CourierAssignedPayload'
+
+    CourierAssignmentFailed:
+      name: CourierAssignmentFailed
+      title: Courier Assignment Failed
+      summary: No courier could be assigned to the order (triggers compensation).
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/CourierAssignmentFailedPayload'
+
+    DeliveryCompleted:
+      name: DeliveryCompleted
+      title: Delivery Completed
+      summary: The order has been delivered to the customer.
+      contentType: application/json
+      payload:
+        $ref: '#/components/schemas/DeliveryCompletedPayload'
+
+  schemas:
+    OrderCreatedPayload:
+      type: object
+      description: |
+        Published by Order Service to the `orders` topic.
+        Consumed by Payment Service and Notification Service.
+      required:
+        - event_type
+        - event_id
+        - order_id
+        - customer_id
+        - restaurant_id
+        - amount
+        - delivery_address
+        - timestamp
+      properties:
+        event_type:
+          type: string
+          const: OrderCreated
+        event_id:
+          type: string
+          format: uuid
+          description: Unique event identifier for idempotency.
+        order_id:
+          type: string
+          format: uuid
+          description: The order this event belongs to. Used as Kafka partition key.
+        customer_id:
+          type: string
+          format: uuid
+        restaurant_id:
+          type: string
+          format: uuid
+        amount:
+          type: number
+          format: double
+          description: Total order amount.
+        delivery_address:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    PaymentAuthorizedPayload:
+      type: object
+      description: |
+        Published by Payment Service to the `payments` topic.
+        Consumed by Order Service, Restaurant Service, and Notification Service.
+      required:
+        - event_type
+        - event_id
+        - order_id
+        - customer_id
+        - payment_id
+        - amount
+        - timestamp
+      properties:
+        event_type:
+          type: string
+          const: PaymentAuthorized
+        event_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+        restaurant_id:
+          type: string
+          format: uuid
+          description: Passed through from OrderCreated. May be null.
+        payment_id:
+          type: string
+          format: uuid
+          description: The payment record ID created by Payment Service.
+        amount:
+          type: number
+          format: double
+        delivery_address:
+          type: string
+          description: Passed through from OrderCreated. May be null.
+        timestamp:
+          type: string
+          format: date-time
+
+    PaymentFailedPayload:
+      type: object
+      description: |
+        Published by Payment Service to the `payments` topic.
+        Consumed by Order Service and Notification Service.
+      required:
+        - event_type
+        - event_id
+        - order_id
+        - reason
+        - timestamp
+      properties:
+        event_type:
+          type: string
+          const: PaymentFailed
+        event_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+          description: May be null.
+        reason:
+          type: string
+          description: Human-readable failure reason (e.g. "Insufficient funds").
+        timestamp:
+          type: string
+          format: date-time
+
+    PaymentRefundedPayload:
+      type: object
+      description: |
+        Published by Payment Service to the `payments` topic after a compensating refund.
+        Triggered by RestaurantRejected or CourierAssignmentFailed events.
+        Consumed by Order Service and Notification Service.
+      required:
+        - event_type
+        - event_id
+        - order_id
+        - customer_id
+        - payment_id
+        - amount
+        - reason
+        - timestamp
+      properties:
+        event_type:
+          type: string
+          const: PaymentRefunded
+        event_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+        payment_id:
+          type: string
+          format: uuid
+        amount:
+          type: number
+          format: double
+          description: The refunded amount.
+        reason:
+          type: string
+          description: 'Why the refund was issued (e.g. "Restaurant rejected order: Kitchen closed").'
+        timestamp:
+          type: string
+          format: date-time
+
+    RestaurantAcceptedPayload:
+      type: object
+      description: |
+        Published by Restaurant Service to the `restaurants` topic.
+        Consumed by Courier Service, Order Service, Payment Service, and Notification Service.
+      required:
+        - event_type
+        - event_id
+        - order_id
+        - customer_id
+        - restaurant_id
+        - estimated_prep_time
+        - timestamp
+      properties:
+        event_type:
+          type: string
+          const: RestaurantAccepted
+        event_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+        restaurant_id:
+          type: string
+          format: uuid
+        estimated_prep_time:
+          type: integer
+          description: Estimated preparation time in minutes.
+        delivery_address:
+          type: string
+          description: Customer delivery address, passed through from the PendingOrder.
+        restaurant_address:
+          type: string
+          description: Restaurant address, used by Courier Service for pickup location.
+        timestamp:
+          type: string
+          format: date-time
+
+    RestaurantRejectedPayload:
+      type: object
+      description: |
+        Published by Restaurant Service to the `restaurants` topic.
+        Triggers compensation: Payment Service refunds, Order Service cancels.
+        Consumed by Payment Service, Order Service, and Notification Service.
+      required:
+        - event_type
+        - event_id
+        - order_id
+        - customer_id
+        - restaurant_id
+        - reason
+        - timestamp
+      properties:
+        event_type:
+          type: string
+          const: RestaurantRejected
+        event_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+        restaurant_id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+          description: Why the restaurant rejected the order.
+        timestamp:
+          type: string
+          format: date-time
+
+    CourierAssignedPayload:
+      type: object
+      description: |
+        Published by Courier Service to the `couriers` topic.
+        Consumed by Order Service and Notification Service.
+      required:
+        - event_type
+        - event_id
+        - order_id
+        - customer_id
+        - courier_id
+        - timestamp
+      properties:
+        event_type:
+          type: string
+          const: CourierAssigned
+        event_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+        courier_id:
+          type: string
+          format: uuid
+        courier_name:
+          type: string
+          description: Display name of the assigned courier.
+        timestamp:
+          type: string
+          format: date-time
+
+    CourierAssignmentFailedPayload:
+      type: object
+      description: |
+        Published by Courier Service to the `couriers` topic.
+        Triggers compensation: Payment Service refunds, Order Service cancels.
+        Consumed by Payment Service, Order Service, and Notification Service.
+      required:
+        - event_type
+        - event_id
+        - order_id
+        - customer_id
+        - restaurant_id
+        - reason
+        - timestamp
+      properties:
+        event_type:
+          type: string
+          const: CourierAssignmentFailed
+        event_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+        restaurant_id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+          description: Why courier assignment failed (e.g. "No available couriers").
+        timestamp:
+          type: string
+          format: date-time
+
+    DeliveryCompletedPayload:
+      type: object
+      description: |
+        Published by Courier Service to the `deliveries` topic.
+        Consumed by Order Service and Notification Service.
+      required:
+        - event_type
+        - event_id
+        - order_id
+        - customer_id
+        - timestamp
+      properties:
+        event_type:
+          type: string
+          const: DeliveryCompleted
+        event_id:
+          type: string
+          format: uuid
+        order_id:
+          type: string
+          format: uuid
+        customer_id:
+          type: string
+          format: uuid
+        timestamp:
+          type: string
+          format: date-time
