@@ -6,13 +6,13 @@ Choreography-based saga — no central orchestrator. Kafka drives the workflow, 
 
 ## Topics
 
-| Topic | Publisher | Consumers |
-|---|---|---|
-| `orders` | Order Service | Payment Service, Notification Service |
-| `payments` | Payment Service | Restaurant Service, Order Service, Notification Service |
-| `restaurants` | Restaurant Service | Courier Service, Order Service, Notification Service |
-| `couriers` | Courier Service | Order Service, Notification Service |
-| `deliveries` | Courier Service | Order Service, Notification Service |
+| Topic | Publisher | Consumers | Events |
+|---|---|---|---|
+| `orders` | Order Service | Payment Service, Notification Service | OrderCreated |
+| `payments` | Payment Service | Order Service, Restaurant Service, Notification Service | PaymentAuthorized, PaymentFailed, PaymentRefunded |
+| `restaurants` | Restaurant Service | Courier Service, Order Service, Notification Service, Payment Service | RestaurantAccepted, RestaurantRejected |
+| `couriers` | Courier Service | Order Service, Notification Service, Payment Service | CourierAssigned, CourierAssignmentFailed |
+| `deliveries` | Courier Service | Order Service, Notification Service | DeliveryCompleted |
 
 ## Happy Path
 
@@ -33,9 +33,61 @@ Each hop updates the order status in Order Service:
 | CourierAssigned | `OUT_FOR_DELIVERY` |
 | DeliveryCompleted | `DELIVERED` |
 
-## Failure Path
+## Order Status Transitions
 
-If payment fails, Payment Service publishes `PaymentFailed` to the `payments` topic. Order Service consumes it and sets status to `CANCELLED`. No further saga steps are triggered.
+| Event | Transition |
+|---|---|
+| OrderCreated | → `PENDING` |
+| PaymentAuthorized | `PENDING` → `PAID` |
+| PaymentFailed | any → `CANCELLED` |
+| RestaurantAccepted | `PAID` → `PREPARING` |
+| RestaurantRejected | `PAID` → `CANCELLED` |
+| CourierAssigned | `PREPARING` → `OUT_FOR_DELIVERY` |
+| CourierAssignmentFailed | `PREPARING` → `CANCELLED` |
+| DeliveryCompleted | `OUT_FOR_DELIVERY` → `DELIVERED` |
+| PaymentRefunded | any non-terminal → `CANCELLED` |
+
+## Failure Paths
+
+### PaymentFailed
+Payment Service publishes `PaymentFailed` to the `payments` topic. Order Service sets status to `CANCELLED`. No further saga steps.
+
+### RestaurantRejected (compensating action)
+Restaurant staff rejects a paid order via REST. Restaurant Service publishes `RestaurantRejected` to `restaurants`.
+```
+RestaurantRejected (restaurants topic)
+  → Payment Service: AUTHORIZED → REFUNDED, publishes PaymentRefunded
+  → Order Service: PAID → CANCELLED
+  → Notification Service: notifies customer
+```
+
+### CourierAssignmentFailed (compensating action)
+No couriers available. Courier Service publishes `CourierAssignmentFailed` to `couriers`.
+```
+CourierAssignmentFailed (couriers topic)
+  → Payment Service: AUTHORIZED → REFUNDED, publishes PaymentRefunded
+  → Order Service: PREPARING → CANCELLED
+  → Notification Service: notifies customer
+```
+
+### PaymentRefunded (compensating follow-up)
+Payment Service refunds after RestaurantRejected or CourierAssignmentFailed and publishes `PaymentRefunded` to `payments`.
+```
+PaymentRefunded (payments topic)
+  → Order Service: → CANCELLED (if not already)
+  → Notification Service: notifies customer of refund
+```
+
+## Restaurant Human-in-the-Loop
+
+Restaurant Service no longer auto-accepts orders. On `PaymentAuthorized`, it saves a `PendingOrder`. Restaurant staff use REST endpoints to accept or reject:
+
+```
+PaymentAuthorized → restaurant-service saves PendingOrder
+GET  /api/v2/restaurants/orders/pending              → list pending orders
+POST /api/v2/restaurants/orders/{orderId}/accept      → RestaurantAccepted (saga continues)
+POST /api/v2/restaurants/orders/{orderId}/reject      → RestaurantRejected (saga compensates)
+```
 
 ## Outside the Kafka Flow
 

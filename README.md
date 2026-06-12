@@ -11,7 +11,7 @@ We are building a food delivery platform as a distributed system of microservice
 | Layer                   | Choice                         | Reason                                                                                                                                               |
 | ----------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Backend languages       | Python, Java                   | Python for FastAPI services, Java (Spring Boot / Quarkus) for services where it fits                                                                 |
-| Frontend                | Angular or React               | Not yet decided                                                                                                                                      |
+| Frontend                | React / TypeScript / Vite      | Component ecosystem, TypeScript support, fast dev server                                                                                             |
 | Service frameworks      | FastAPI, Spring Boot / Quarkus | FastAPI for lightweight Python services, Spring Boot / Quarkus for Java services                                                                     |
 | Message broker          | Kafka                          | Seems like the industry standard for event-driven microservices + we have experience with it and want to get better at it, as it is relevant at work |
 | Primary databases       | PostgreSQL                     | Relational — fits the structured, transactional data in Order, Payment, Courier, and User Profile services                                           |
@@ -38,7 +38,7 @@ The system is structured as independent microservices behind an API Gateway, wit
 - **Courier Service** — handles courier assignment and delivery tracking
 - **User Profile Service** — stores domain user data (addresses, preferences) linked to Keycloak user IDs
 - **Notification Service** — subscribes to all Kafka topics and pushes notifications to users
-- **AI Service** — We still need to figure out what exactly this will do
+- **AI Service** — Ollama-based courier scoring and ETA prediction, called synchronously by Courier Service
 
 **Frontend interaction:**
 The frontend communicates with the API Gateway over REST and GraphQL for standard operations, and WebSocket for real-time delivery tracking and notifications. The frontend authenticates directly with Keycloak (OIDC) and passes the resulting JWT to the gateway on every request.
@@ -55,11 +55,11 @@ Each microservice lives in its own GitHub repository under the DLS-soft2 organis
 
 ## Architectural Patterns
 
-**Choreography-based saga** — Services react to Kafka events and the Order Service maintains the state. See [saga-events.md](saga-events.md) for the full event flow.
+**Choreography-based saga** — Services react to Kafka events and the Order Service maintains the state. Includes compensating actions: RestaurantRejected and CourierAssignmentFailed trigger payment refunds and order cancellation. See [saga-events.md](saga-events.md) for the full event flow including failure paths.
 
-**CQRS** — under consideration but will be implemented for services with a high read-to-write ratio (e.g. customers frequently checking order status vs. fewer writes).
+**CQRS** — Implemented in Order Service with separate read model (OrderResponse) and write model (Order ORM). Frequent status queries are served from the read model.
 
-**Tombstone / Snapshot pattern** — under consideration - would make sense for maintaining historical data without hard deletes, particularly for order and payment history.
+**Tombstone / Snapshot pattern** — Implemented in Order Service. Tombstone: `order_tombstones` table with immutable soft-delete (no row mutation). Snapshot: `OrderSnapshot` captured at every status transition with a history endpoint.
 
 **Shared RBAC libraries** — authorization logic (role decorators, JWT claims parsing) lives in shared libraries (`auth-lib-python`, `auth-lib-java`) used as build-time dependencies. The API Gateway handles authentication, services handle authorization. This way we don't need to implement auth logic in each service, and we can enforce consistent RBAC across the system.
 
